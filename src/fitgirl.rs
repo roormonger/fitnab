@@ -303,17 +303,25 @@ impl Provider for FitgirlProvider {
                 }
             }
 
-            let updated = sqlx::query!(
+            let pub_date_str = pub_date.map(|d| d.to_rfc3339());
+
+            let updated = sqlx::query(
                 r#"
-                INSERT INTO games (id, provider, title, post_url, is_indexed)
-                VALUES (?1, ?2, ?3, ?4, 0)
-                ON CONFLICT(id) DO UPDATE SET is_indexed = 0
-                "#,
-                id,
-                provider_name,
-                title,
-                post_url
+                INSERT INTO games (id, provider, title, post_url, published_at, is_indexed)
+                VALUES (?1, ?2, ?3, ?4, ?5, 0)
+                ON CONFLICT(id) DO UPDATE SET 
+                    is_indexed = CASE 
+                        WHEN excluded.published_at > COALESCE(games.published_at, '') THEN 0 
+                        ELSE games.is_indexed 
+                    END,
+                    published_at = excluded.published_at
+                "#
             )
+            .bind(&id)
+            .bind(provider_name)
+            .bind(&title)
+            .bind(&post_url)
+            .bind(pub_date_str)
             .execute(&mut *tx)
             .await?;
 

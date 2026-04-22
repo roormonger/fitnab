@@ -175,7 +175,9 @@ async fn torznab_api_handler(
                 if !game.is_indexed {
                     tracing::info!("JIT: Fetching metadata for {}", game.title);
                     if let Ok(metadata) = state.fitgirl_provider.fetch_metadata(&game.post_url).await {
-                        let hash = metadata.magnet_link.as_ref().and_then(|m| extract_info_hash(m));
+                        let (hash, _) = metadata.magnet_link.as_ref()
+                            .map(|m| extract_info_hash_and_trackers(m))
+                            .unwrap_or((None, vec![]));
                         
                         // Update DB
                         let _ = sqlx::query(
@@ -206,19 +208,35 @@ async fn torznab_api_handler(
                 let mut seeders = game.seeders.unwrap_or(0) as u32;
                 let mut leechers = game.leechers.unwrap_or(0) as u32;
 
-                if let Some(ref hash_hex) = game.info_hash {
-                    if let Ok(hash_bytes) = hex::decode(hash_hex) {
+                let (hash_opt, trackers) = match game.magnet_link.as_deref() {
+                    Some(m) => extract_info_hash_and_trackers(m),
+                    None => (game.info_hash.clone(), vec!["tracker.opentrackr.org:1337".to_string()]),
+                };
+
+                if let Some(hash_hex) = hash_opt {
+                    if let Ok(hash_bytes) = hex::decode(&hash_hex) {
                         if let Ok(h_bytes) = hash_bytes.try_into() {
-                            // Try a popular tracker
-                            tracing::debug!("Scraping health for {}", game.title);
-                            match scrape::scrape_tracker(&h_bytes, "tracker.opentrackr.org:1337").await {
-                                Ok(res) => {
-                                    seeders = res.seeders;
-                                    leechers = res.leechers;
-                                    tracing::debug!("Health for {}: {} seeders, {} peers", game.title, seeders, leechers);
-                                }
-                                Err(e) => {
-                                    tracing::debug!("Scrape failed for {}: {}", game.title, e);
+                            // Try trackers in parallel (take first success)
+                            let mut trackers_to_try = trackers;
+                            if trackers_to_try.is_empty() {
+                                trackers_to_try.push("tracker.opentrackr.org:1337".to_string());
+                            }
+                            // Limit to top 3 trackers to avoid spamming
+                            trackers_to_try.truncate(3);
+
+                            tracing::debug!("Scraping health for {} using {} trackers", game.title, trackers_to_try.len());
+                            
+                            for tr_addr in trackers_to_try {
+                                match scrape::scrape_tracker(&h_bytes, &tr_addr).await {
+                                    Ok(res) => {
+                                        seeders = res.seeders;
+                                        leechers = res.leechers;
+                                        tracing::debug!("Health for {}: {} seeders, {} peers (from {})", game.title, seeders, leechers, tr_addr);
+                                        break; // Found one!
+                                    }
+                                    Err(e) => {
+                                        tracing::debug!("Scrape failed for {} on {}: {}", game.title, tr_addr, e);
+                                    }
                                 }
                             }
                         }
@@ -282,23 +300,23 @@ async fn torznab_api_handler(
     }
 }
 
-fn extract_info_hash(magnet: &str) -> Option<String> {
-    // magnet:?xt=urn:btih:<HASH>&...
-    // Support both 40-char hex and 32-char base32
-    let re = regex::Regex::new(r"btih:([a-zA-Z0-9]{32,40})").unwrap();
-    re.captures(magnet).map(|c| {
-        let hash = c.get(1).unwrap().as_str().to_lowercase();
-        if hash.len() == 40 {
-            hash
-        } else if hash.len() == 32 {
-            // This is base32, we should ideally convert it to hex, 
-            // but for now let's just return it and we'll handle it if needed.
-            // FitGirl usually uses 40-char hex.
-            hash
-        } else {
-            hash
+fn extract_info_hash_and_trackers(magnet: &str) -> (Option<String>, Vec<String>) {
+    let hash_re = regex::Regex::new(r"btih:([a-zA-Z0-9]{32,40})").unwrap();
+    let hash = hash_re.captures(magnet).map(|c| c.get(1).unwrap().as_str().to_lowercase());
+    
+    let tracker_re = regex::Regex::new(r"tr=([^&]+)").unwrap();
+    let mut trackers = Vec::new();
+    for caps in tracker_re.captures_iter(magnet) {
+        if let Some(m) = caps.get(1) {
+            let tr = urlencoding::decode(m.as_str()).unwrap_or_default().to_string();
+            // We only support UDP trackers for scraping currently
+            if tr.starts_with("udp://") {
+                trackers.push(tr.replace("udp://", ""));
+            }
         }
-    })
+    }
+
+    (hash, trackers)
 }
 
 async fn download_handler(
@@ -326,7 +344,7 @@ async fn download_handler(
     match state.fitgirl_provider.fetch_metadata(&game.post_url).await {
         Ok(metadata) => {
             if let Some(magnet) = metadata.magnet_link.clone() {
-                let hash = extract_info_hash(&magnet);
+                let (hash, _) = extract_info_hash_and_trackers(&magnet);
                 // Update DB
                 let _ = sqlx::query(
                     "UPDATE games SET is_indexed = 1, magnet_link = ?1, size_bytes = ?2, published_at = ?3, info_hash = ?4, seeders = ?5, leechers = ?6, completed = ?7 WHERE id = ?8"
