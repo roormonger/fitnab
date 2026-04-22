@@ -6,15 +6,15 @@ use std::time::Duration;
 use rand::Rng;
 
 pub struct FitgirlProvider {
-    client: rquest::Client,
+    client: reqwest::Client,
 }
 
 impl FitgirlProvider {
     pub fn new() -> Self {
-        let client = rquest::Client::builder()
+        let client = reqwest::Client::builder()
             .timeout(Duration::from_secs(30))
             .build()
-            .expect("Failed to build rquest client");
+            .expect("Failed to build reqwest client");
 
         Self { client }
     }
@@ -74,17 +74,17 @@ impl Provider for FitgirlProvider {
             let mut tx = pool.begin().await?;
             
             for (id, title, post_url) in items_to_insert {
-                let inserted = sqlx::query!(
+                let inserted = sqlx::query(
                     r#"
                     INSERT INTO games (id, provider, title, post_url, is_indexed)
                     VALUES (?1, ?2, ?3, ?4, 0)
                     ON CONFLICT(id) DO NOTHING
-                    "#,
-                    id,
-                    provider_name,
-                    title,
-                    post_url
+                    "#
                 )
+                .bind(id)
+                .bind(provider_name)
+                .bind(title)
+                .bind(post_url)
                 .execute(&mut *tx)
                 .await?;
 

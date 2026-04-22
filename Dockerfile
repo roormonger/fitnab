@@ -9,7 +9,8 @@ RUN cargo chef prepare --recipe-path recipe.json
 # Stage 2: Caching Dependencies
 FROM rust:alpine AS cacher
 WORKDIR /app
-RUN apk add --no-cache musl-dev sqlite-static openssl-dev openssl-libs-static pkgconfig g++ gcc make cmake perl clang-dev linux-headers
+# Only essential build tools needed now that we are using pure-Rust TLS
+RUN apk add --no-cache musl-dev sqlite-static pkgconfig gcc make
 RUN cargo install cargo-chef
 COPY --from=planner /app/recipe.json recipe.json
 RUN cargo chef cook --release --target x86_64-unknown-linux-musl --recipe-path recipe.json
@@ -17,15 +18,13 @@ RUN cargo chef cook --release --target x86_64-unknown-linux-musl --recipe-path r
 # Stage 3: Builder
 FROM rust:alpine AS builder
 WORKDIR /app
-# Install all build-time dependencies
-RUN apk add --no-cache musl-dev sqlite-static openssl-dev openssl-libs-static pkgconfig g++ gcc make cmake perl clang-dev linux-headers
+RUN apk add --no-cache musl-dev sqlite-static pkgconfig gcc make
 
-# Create a non-privileged user for the final image
+# Create non-privileged user
 RUN addgroup -S fitnab && adduser -S fitnab -G fitnab
 
 COPY . .
-# Build a fully static binary
-# We link sqlite and openssl statically so we can run in a 'scratch' or 'static' distroless image
+# Build a fully static binary using musl and rustls
 ENV RUSTFLAGS="-C target-feature=+crt-static"
 RUN cargo build --release --target x86_64-unknown-linux-musl
 
@@ -40,13 +39,6 @@ COPY --from=builder /etc/group /etc/group
 
 # Copy the static binary
 COPY --from=builder /app/target/x86_64-unknown-linux-musl/release/fitnab /usr/local/bin/fitnab
-
-# Copy timezone data and CA certificates (already in distroless static, but good to be explicit)
-# Distroless static includes these by default.
-
-# Create data directory (Distroless doesn't have mkdir, so we do it in builder or rely on volume)
-# We'll use the user we created
-USER fitnab
 
 # Torznab API port
 EXPOSE 3000

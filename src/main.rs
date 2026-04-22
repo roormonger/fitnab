@@ -73,6 +73,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         .connect(&db_url)
         .await?;
 
+    // Enable WAL mode for better concurrency and to prevent "database is locked" errors
+    sqlx::query("PRAGMA journal_mode = WAL;").execute(&pool).await?;
+    sqlx::query("PRAGMA synchronous = NORMAL;").execute(&pool).await?;
+
     tracing::info!("Running database migrations...");
     sqlx::migrate!("./migrations").run(&pool).await?;
 
@@ -229,29 +233,36 @@ async fn torznab_api_handler(
                 if let Some(hash_hex) = hash_opt {
                     if let Ok(hash_bytes) = hex::decode(&hash_hex) {
                         if let Ok(h_bytes) = hash_bytes.try_into() {
-                            // Try trackers in parallel (take first success)
                             let mut trackers_to_try = trackers;
                             if trackers_to_try.is_empty() {
                                 trackers_to_try.push("tracker.opentrackr.org:1337".to_string());
                             }
-                            // Limit to top 3 trackers to avoid spamming
                             trackers_to_try.truncate(3);
 
-                            tracing::debug!("Scraping health for {} using {} trackers", game.title, trackers_to_try.len());
+                            tracing::debug!("Scraping health for {} using {} trackers in parallel", game.title, trackers_to_try.len());
                             
+                            let mut scrape_futures = Vec::new();
                             for tr_addr in trackers_to_try {
-                                match scrape::scrape_tracker(&h_bytes, &tr_addr).await {
-                                    Ok(res) => {
-                                        seeders = res.seeders;
-                                        leechers = res.leechers;
-                                        tracing::debug!("Health for {}: {} seeders, {} peers (from {})", game.title, seeders, leechers, tr_addr);
-                                        break; // Found one!
+                                let h_bytes_clone = h_bytes;
+                                scrape_futures.push(async move {
+                                    scrape::scrape_tracker(&h_bytes_clone, &tr_addr).await
+                                });
+                            }
+
+                            use futures::future::join_all;
+                            let results = join_all(scrape_futures).await;
+
+                            for res in results {
+                                if let Ok(s_res) = res {
+                                    if s_res.seeders > seeders {
+                                        seeders = s_res.seeders;
                                     }
-                                    Err(e) => {
-                                        tracing::debug!("Scrape failed for {} on {}: {}", game.title, tr_addr, e);
+                                    if s_res.leechers > leechers {
+                                        leechers = s_res.leechers;
                                     }
                                 }
                             }
+                            tracing::debug!("Final health for {}: {} seeders, {} peers", game.title, seeders, leechers);
                         }
                     }
                 }
@@ -265,6 +276,7 @@ async fn torznab_api_handler(
                     Err(_) => "Mon, 01 Jan 2024 00:00:00 +0000".to_string(),
                 };
 
+                let display_title = format!("{}-FitGirl", game.title);
                 let enclosure_url = format!("http://{}/download/{}", host, game.id);
 
                 items.push_str(&format!(
@@ -279,11 +291,12 @@ async fn torznab_api_handler(
             <category>4050</category>
             <torznab:attr name="category" value="4000" />
             <torznab:attr name="category" value="4050" />
+            <torznab:attr name="group" value="FitGirl" />
             <torznab:attr name="seeders" value="{}" />
             <torznab:attr name="peers" value="{}" />
             <enclosure url="{}" length="{}" type="application/x-bittorrent" />
         </item>"#,
-                    quick_xml::escape::escape(&game.title),
+                    quick_xml::escape::escape(&display_title),
                     game.id,
                     quick_xml::escape::escape(&game.post_url),
                     rfc_date,
@@ -324,7 +337,10 @@ fn extract_info_hash_and_trackers(magnet: &str) -> (Option<String>, Vec<String>)
             let tr = urlencoding::decode(m.as_str()).unwrap_or_default().to_string();
             // We only support UDP trackers for scraping currently
             if tr.starts_with("udp://") {
-                trackers.push(tr.replace("udp://", ""));
+                let clean_tr = tr.replace("udp://", "");
+                // UDP trackers don't use paths, so strip anything after the first '/'
+                let host_port = clean_tr.split('/').next().unwrap_or(&clean_tr).to_string();
+                trackers.push(host_port);
             }
         }
     }

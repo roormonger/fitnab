@@ -1,5 +1,6 @@
 /target
 /data
+docker-compose.dev.yml
 /feed.xml
 .env
 *.log
