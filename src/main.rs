@@ -220,54 +220,54 @@ async fn torznab_api_handler(
             let is_searching = !q.is_empty();
 
             for mut game in results {
-                // Only JIT Fetch if we have a specific search query. 
-                // For browsing "latest" (empty query), we skip JIT to avoid hammering the provider.
-                if is_searching {
-                    game = state.jit_index_game(game).await;
-                }
-
-                // Live Health Check
                 let mut seeders = game.seeders.unwrap_or(0) as u32;
                 let mut leechers = game.leechers.unwrap_or(0) as u32;
 
-                let (hash_opt, trackers) = match game.magnet_link.as_deref() {
-                    Some(m) => extract_info_hash_and_trackers(m),
-                    None => (game.info_hash.clone(), vec!["tracker.opentrackr.org:1337".to_string()]),
-                };
+                // Only JIT Fetch and Live Health Scrape if we have a specific search query. 
+                // For browsing "latest" (empty query), we skip these to avoid hammering servers and timing out.
+                if is_searching {
+                    game = state.jit_index_game(game).await;
 
-                if let Some(hash_hex) = hash_opt {
-                    if let Ok(hash_bytes) = hex::decode(&hash_hex) {
-                        if let Ok(h_bytes) = hash_bytes.try_into() {
-                            let mut trackers_to_try = trackers;
-                            if trackers_to_try.is_empty() {
-                                trackers_to_try.push("tracker.opentrackr.org:1337".to_string());
-                            }
-                            trackers_to_try.truncate(3);
+                    // Live Health Check
+                    let (hash_opt, trackers) = match game.magnet_link.as_deref() {
+                        Some(m) => extract_info_hash_and_trackers(m),
+                        None => (game.info_hash.clone(), vec!["tracker.opentrackr.org:1337".to_string()]),
+                    };
 
-                            tracing::debug!("Scraping health for {} using {} trackers in parallel", game.title, trackers_to_try.len());
-                            
-                            let mut scrape_futures = Vec::new();
-                            for tr_addr in trackers_to_try {
-                                let h_bytes_clone = h_bytes;
-                                scrape_futures.push(async move {
-                                    scrape::scrape_tracker(&h_bytes_clone, &tr_addr).await
-                                });
-                            }
+                    if let Some(hash_hex) = hash_opt {
+                        if let Ok(hash_bytes) = hex::decode(&hash_hex) {
+                            if let Ok(h_bytes) = hash_bytes.try_into() {
+                                let mut trackers_to_try = trackers;
+                                if trackers_to_try.is_empty() {
+                                    trackers_to_try.push("tracker.opentrackr.org:1337".to_string());
+                                }
+                                trackers_to_try.truncate(3);
 
-                            use futures::future::join_all;
-                            let results = join_all(scrape_futures).await;
+                                tracing::debug!("Scraping health for {} using {} trackers in parallel", game.title, trackers_to_try.len());
+                                
+                                let mut scrape_futures = Vec::new();
+                                for tr_addr in trackers_to_try {
+                                    let h_bytes_clone = h_bytes;
+                                    scrape_futures.push(async move {
+                                        scrape::scrape_tracker(&h_bytes_clone, &tr_addr).await
+                                    });
+                                }
 
-                            for res in results {
-                                if let Ok(s_res) = res {
-                                    if s_res.seeders > seeders {
-                                        seeders = s_res.seeders;
-                                    }
-                                    if s_res.leechers > leechers {
-                                        leechers = s_res.leechers;
+                                use futures::future::join_all;
+                                let results = join_all(scrape_futures).await;
+
+                                for res in results {
+                                    if let Ok(s_res) = res {
+                                        if s_res.seeders > seeders {
+                                            seeders = s_res.seeders;
+                                        }
+                                        if s_res.leechers > leechers {
+                                            leechers = s_res.leechers;
+                                        }
                                     }
                                 }
+                                tracing::debug!("Final health for {}: {} seeders, {} peers", game.title, seeders, leechers);
                             }
-                            tracing::debug!("Final health for {}: {} seeders, {} peers", game.title, seeders, leechers);
                         }
                     }
                 }
