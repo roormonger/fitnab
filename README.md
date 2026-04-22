@@ -1,6 +1,6 @@
 # Fitnab 🚀
 
-**Fitnab** is a tiny 15 mb container thatacts as a torrent indexer for the fitgirl repack site serving torrent files only.
+**Fitnab** is a tiny 15 mb container that acts as a torrent indexer for the fitgirl repack site serving torrent files only.
 
 ---
 
