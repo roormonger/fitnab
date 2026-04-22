@@ -45,16 +45,13 @@ impl Provider for FitgirlProvider {
             let html_content = res.text().await?;
             
             let mut items_to_insert = Vec::new();
-            let mut has_next = false;
-            let mut parsed_any = false;
-            
-            {
+            let (has_next, parsed_any) = {
                 let document = Html::parse_document(&html_content);
                 let ul_selector = Selector::parse("ul.lcp_catlist li a").unwrap();
                 let next_selector = Selector::parse("ul.lcp_paginator li a[title='Next']").unwrap();
 
-                has_next = document.select(&next_selector).next().is_some();
-                parsed_any = document.select(&ul_selector).next().is_some();
+                let has_next = document.select(&next_selector).next().is_some();
+                let parsed_any = document.select(&ul_selector).next().is_some();
 
                 for element in document.select(&ul_selector) {
                     let title = element.text().collect::<Vec<_>>().join("");
@@ -68,7 +65,8 @@ impl Provider for FitgirlProvider {
                         items_to_insert.push((id, title, post_url.to_string()));
                     }
                 }
-            }
+                (has_next, parsed_any)
+            };
 
             let mut found_on_page = 0;
             let provider_name = self.name();
@@ -114,7 +112,7 @@ impl Provider for FitgirlProvider {
         Ok(())
     }
 
-    async fn fetch_metadata(&self, post_url: &str) -> Result<(Option<String>, Option<i64>, Option<String>), Box<dyn std::error::Error + Send + Sync>> {
+    async fn fetch_metadata(&self, post_url: &str) -> Result<crate::provider::Metadata, Box<dyn std::error::Error + Send + Sync>> {
         tracing::info!("Deep fetching metadata for: {}", post_url);
         
         let res = self.client.get(post_url).send().await?;
@@ -124,6 +122,9 @@ impl Provider for FitgirlProvider {
         let mut magnet_link = None;
         let mut size_bytes = None;
         let mut published_at = None;
+        let seeders = None;
+        let leechers = None;
+        let completed = None;
 
         let a_selector = Selector::parse("a[href^='magnet:?']").unwrap();
         if let Some(magnet_elem) = document.select(&a_selector).next() {
@@ -139,13 +140,15 @@ impl Provider for FitgirlProvider {
         if let Some(content) = document.select(&content_selector).next() {
             let full_text = content.text().collect::<Vec<_>>().join(" ");
             
-            if let Some(caps) = regex::Regex::new(r"(?i)(?:repack\s+)?size[:\s]+(?:from\s+)?([\d.]+)\s*([KMGT]B)")
-                .unwrap()
-                .captures(&full_text) 
-            {
-                let val: f64 = caps.get(1).unwrap().as_str().parse().unwrap_or(0.0);
-                let unit = caps.get(2).unwrap().as_str().to_uppercase();
+            // 1. Try to get "Repack Size" explicitly (Best source for size)
+            let repack_re = regex::Regex::new(r"(?i)Repack\s+Size\s*[:\s]+\s*(?:from\s+)?([\d./]+)\s*([KMGT]B)").unwrap();
+            if let Some(caps) = repack_re.captures(&full_text) {
+                let raw_val = caps.get(1).unwrap().as_str();
+                // If it's a range like "55/55.1", take the last number
+                let val_str = raw_val.split('/').last().unwrap_or(raw_val);
+                let val: f64 = val_str.parse().unwrap_or(0.0);
                 
+                let unit = caps.get(2).unwrap().as_str().to_uppercase();
                 let multiplier = match unit.as_str() {
                     "KB" => 1024,
                     "MB" => 1024 * 1024,
@@ -153,12 +156,47 @@ impl Provider for FitgirlProvider {
                     "TB" => 1024 * 1024 * 1024 * 1024,
                     _ => 1,
                 };
-                
                 size_bytes = Some((val * multiplier as f64) as i64);
+                tracing::debug!("Found repack size: {} bytes", size_bytes.unwrap());
+            }
+
+            // 2. Last resort: General size regex (strictly avoiding "Original Size")
+            if size_bytes.is_none() {
+                // Match anything like "Size: 10 GB" but we'll check the prefix in Rust
+                let general_re = regex::Regex::new(r"(?i)(Original\s+)?Size\s*[:\s]+\s*(?:from\s+)?([\d./]+)\s*([KMGT]B)").unwrap();
+                for caps in general_re.captures_iter(&full_text) {
+                    // Skip if it matched "Original Size"
+                    if caps.get(1).is_some() {
+                        continue;
+                    }
+
+                    let raw_val = caps.get(2).unwrap().as_str();
+                    let val_str = raw_val.split('/').last().unwrap_or(raw_val);
+                    let val: f64 = val_str.parse().unwrap_or(0.0);
+
+                    let unit = caps.get(3).unwrap().as_str().to_uppercase();
+                    let multiplier = match unit.as_str() {
+                        "KB" => 1024,
+                        "MB" => 1024 * 1024,
+                        "GB" => 1024 * 1024 * 1024,
+                        "TB" => 1024 * 1024 * 1024 * 1024,
+                        _ => 1,
+                    };
+                    size_bytes = Some((val * multiplier as f64) as i64);
+                    tracing::debug!("Found general size: {} bytes", size_bytes.unwrap());
+                    break;
+                }
             }
         }
 
-        Ok((magnet_link, size_bytes, published_at))
+        Ok(crate::provider::Metadata {
+            magnet_link,
+            size_bytes,
+            published_at,
+            seeders,
+            leechers,
+            completed,
+        })
     }
 
     async fn sync_rss(&self, pool: &SqlitePool) -> Result<Option<chrono::DateTime<chrono::Utc>>, Box<dyn std::error::Error + Send + Sync>> {

@@ -1,4 +1,3 @@
-use std::net::SocketAddr;
 use tokio::net::UdpSocket;
 use std::time::Duration;
 use tokio::time::timeout;
@@ -22,7 +21,6 @@ pub async fn scrape_tracker(info_hash: &[u8; 20], tracker_addr: &str) -> Result<
     connect_packet.extend_from_slice(&transaction_id.to_be_bytes());
 
     socket.send(&connect_packet).await?;
-    tracing::debug!("Sent connect packet to {}", tracker_addr);
 
     let mut buf = [0u8; 1024];
     let n = timeout(Duration::from_secs(5), socket.recv(&mut buf)).await??;
@@ -42,7 +40,6 @@ pub async fn scrape_tracker(info_hash: &[u8; 20], tracker_addr: &str) -> Result<
     scrape_packet.extend_from_slice(info_hash);
 
     socket.send(&scrape_packet).await?;
-    tracing::debug!("Sent scrape packet for hash: {}", hex::encode(info_hash));
 
     let n = timeout(Duration::from_secs(5), socket.recv(&mut buf)).await??;
 

@@ -11,7 +11,6 @@ use axum::{
 use provider::Provider;
 use sqlx::sqlite::{SqlitePool, SqlitePoolOptions};
 use std::{net::SocketAddr, sync::Arc, collections::HashMap};
-use tokio::sync::Mutex;
 
 #[derive(Clone)]
 struct AppState {
@@ -127,6 +126,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
 
 mod scrape;
 
+
 async fn torznab_api_handler(
     State(state): State<AppState>,
     Host(host): Host,
@@ -157,11 +157,11 @@ async fn torznab_api_handler(
             
             // Query DB
             let query_str = format!("%{}%", q);
-            let results = match sqlx::query_as!(
-                provider::GameEntry,
-                "SELECT id as 'id!', provider as 'provider!', title as 'title!', post_url as 'post_url!', magnet_link, torrent_blob, is_indexed as 'is_indexed!: bool', size_bytes, published_at, info_hash FROM games WHERE title LIKE ?1 ORDER BY published_at DESC LIMIT 50",
-                query_str
-            ).fetch_all(&state.pool).await {
+            let results = match sqlx::query_as::<_, provider::GameEntry>(
+                "SELECT id, provider, title, post_url, magnet_link, torrent_blob, is_indexed, size_bytes, published_at, info_hash, seeders, leechers, completed FROM games WHERE title LIKE ?1 ORDER BY published_at DESC LIMIT 50"
+            )
+            .bind(&query_str)
+            .fetch_all(&state.pool).await {
                 Ok(res) => res,
                 Err(e) => {
                     tracing::error!("DB error: {}", e);
@@ -174,26 +174,38 @@ async fn torznab_api_handler(
                 // JIT Fetch: If not indexed, go fetch metadata
                 if !game.is_indexed {
                     tracing::info!("JIT: Fetching metadata for {}", game.title);
-                    if let Ok((magnet, size, date)) = state.fitgirl_provider.fetch_metadata(&game.post_url).await {
-                        let hash = magnet.as_ref().and_then(|m| extract_info_hash(m));
+                    if let Ok(metadata) = state.fitgirl_provider.fetch_metadata(&game.post_url).await {
+                        let hash = metadata.magnet_link.as_ref().and_then(|m| extract_info_hash(m));
                         
                         // Update DB
-                        let _ = sqlx::query!(
-                            "UPDATE games SET is_indexed = 1, magnet_link = ?1, size_bytes = ?2, published_at = ?3, info_hash = ?4 WHERE id = ?5",
-                            magnet, size, date, hash, game.id
-                        ).execute(&state.pool).await;
+                        let _ = sqlx::query(
+                            "UPDATE games SET is_indexed = 1, magnet_link = ?1, size_bytes = ?2, published_at = ?3, info_hash = ?4, seeders = ?5, leechers = ?6, completed = ?7 WHERE id = ?8"
+                        )
+                        .bind(&metadata.magnet_link)
+                        .bind(metadata.size_bytes)
+                        .bind(&metadata.published_at)
+                        .bind(&hash)
+                        .bind(metadata.seeders)
+                        .bind(metadata.leechers)
+                        .bind(metadata.completed)
+                        .bind(&game.id)
+                        .execute(&state.pool).await;
 
-                        game.magnet_link = magnet;
-                        game.size_bytes = size;
-                        game.published_at = date;
+                        game.magnet_link = metadata.magnet_link;
+                        game.size_bytes = metadata.size_bytes;
+                        game.published_at = metadata.published_at;
                         game.info_hash = hash;
+                        game.seeders = metadata.seeders;
+                        game.leechers = metadata.leechers;
+                        game.completed = metadata.completed;
                         game.is_indexed = true;
                     }
                 }
 
                 // Live Health Check
-                let mut seeders = 0;
-                let mut leechers = 0;
+                let mut seeders = game.seeders.unwrap_or(0) as u32;
+                let mut leechers = game.leechers.unwrap_or(0) as u32;
+
                 if let Some(ref hash_hex) = game.info_hash {
                     if let Ok(hash_bytes) = hex::decode(hash_hex) {
                         if let Ok(h_bytes) = hash_bytes.try_into() {
@@ -293,11 +305,10 @@ async fn download_handler(
     State(state): State<AppState>,
     Path(id): Path<String>,
 ) -> impl IntoResponse {
-    let row_opt = sqlx::query_as!(
-        provider::GameEntry,
-        "SELECT id as 'id!', provider as 'provider!', title as 'title!', post_url as 'post_url!', magnet_link, torrent_blob, is_indexed as 'is_indexed!: bool', size_bytes, published_at, info_hash FROM games WHERE id = ?1", 
-        id
+    let row_opt = sqlx::query_as::<_, provider::GameEntry>(
+        "SELECT id, provider, title, post_url, magnet_link, torrent_blob, is_indexed, size_bytes, published_at, info_hash, seeders, leechers, completed FROM games WHERE id = ?1"
     )
+    .bind(&id)
     .fetch_optional(&state.pool)
     .await
     .unwrap_or(None);
@@ -313,14 +324,22 @@ async fn download_handler(
 
     // Do deep fetch
     match state.fitgirl_provider.fetch_metadata(&game.post_url).await {
-        Ok((magnet_link, size, date)) => {
-            if let Some(magnet) = magnet_link {
+        Ok(metadata) => {
+            if let Some(magnet) = metadata.magnet_link.clone() {
                 let hash = extract_info_hash(&magnet);
                 // Update DB
-                let _ = sqlx::query!(
-                    "UPDATE games SET is_indexed = 1, magnet_link = ?1, size_bytes = ?2, published_at = ?3, info_hash = ?4 WHERE id = ?5",
-                    magnet, size, date, hash, id
-                ).execute(&state.pool).await;
+                let _ = sqlx::query(
+                    "UPDATE games SET is_indexed = 1, magnet_link = ?1, size_bytes = ?2, published_at = ?3, info_hash = ?4, seeders = ?5, leechers = ?6, completed = ?7 WHERE id = ?8"
+                )
+                .bind(&metadata.magnet_link)
+                .bind(metadata.size_bytes)
+                .bind(&metadata.published_at)
+                .bind(&hash)
+                .bind(metadata.seeders)
+                .bind(metadata.leechers)
+                .bind(metadata.completed)
+                .bind(&id)
+                .execute(&state.pool).await;
                 
                 return Redirect::temporary(&magnet).into_response();
             } else {
