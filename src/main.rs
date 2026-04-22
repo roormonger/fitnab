@@ -217,9 +217,14 @@ async fn torznab_api_handler(
             };
 
             let mut items = String::new();
+            let is_searching = !q.is_empty();
+
             for mut game in results {
-                // JIT Fetch: If not indexed, go fetch metadata
-                game = state.jit_index_game(game).await;
+                // Only JIT Fetch if we have a specific search query. 
+                // For browsing "latest" (empty query), we skip JIT to avoid hammering the provider.
+                if is_searching {
+                    game = state.jit_index_game(game).await;
+                }
 
                 // Live Health Check
                 let mut seeders = game.seeders.unwrap_or(0) as u32;
