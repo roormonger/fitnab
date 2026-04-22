@@ -1,0 +1,31 @@
+[package]
+name = "fitnab"
+version = "0.1.0"
+edition = "2021"
+default-run = "fitnab"
+description = "Lightweight, high-performance Dockerized Torznab Indexer"
+
+[dependencies]
+tokio = { version = "1.40", features = ["full"] }
+axum = "0.7.7"
+sqlx = { version = "0.8.2", features = ["runtime-tokio-rustls", "sqlite", "chrono"] }
+rquest = "*"
+scraper = "0.20.0"
+quick-xml = { version = "0.36.1", features = ["serialize"] }
+serde = { version = "1.0.210", features = ["derive"] }
+serde_json = "1.0.128"
+async-trait = "0.1.83"
+chrono = { version = "0.4.38", features = ["serde"] }
+tracing = "0.1.40"
+tracing-subscriber = { version = "0.3.18", features = ["env-filter"] }
+rand = "0.8.5"
+regex = "1.11.0"
+hex = "0.4.3"
+
+[profile.release]
+opt-level = "z"  # Optimize for size
+lto = true       # Enable Link Time Optimization
+codegen-units = 1 # Maximize size optimization
+panic = "abort"  # Remove panic unwinding
+strip = true     # Strip symbols from binary
+
