@@ -1,8 +1,6 @@
 # Fitnab 🚀
 
-**Fitnab** is a high-performance, hardened, and low-maintenance Torznab indexer designed to seamlessly bridge game repack metadata into your favorite media management tools (like Prowlarr, Sonarr, or Questarr).
-
-Written in **Rust**, Fitnab is built for speed, efficiency, and rock-solid stability.
+**Fitnab** is a tiny 15 mb container thatacts as a torrent indexer for the fitgirl repack site serving torrent files only.
 
 ---
 
@@ -49,26 +47,3 @@ The easiest way to run Fitnab is using the pre-built image from **GHCR**.
          - RUST_LOG=info
    ```
 
-2. Launch the indexer:
-   ```bash
-   docker-compose up -d
-   ```
-
-### Adding to Prowlarr
-- **Indexer Type**: Generic Torznab
-- **URL**: `http://your-server-ip:3000`
-- **API Key**: (None required)
-- **Categories**: 4000, 4050 (PC/Games)
-
----
-
-## 🛠️ Tech Stack
-- **Language**: [Rust](https://www.rust-lang.org/)
-- **Framework**: [Axum](https://github.com/tokio-rs/axum)
-- **Database**: [SQLite](https://sqlite.org/) (via [SQLx](https://github.com/launchbadge/sqlx))
-- **CI/CD**: GitHub Actions pushing to GHCR.io
-
----
-
-## 📝 License
-This project is for educational purposes only. Please support game developers by purchasing titles whenever possible.
