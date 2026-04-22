@@ -2,7 +2,7 @@ version: '3.8'
 
 services:
   fitnab:
-    build: .
+    image: ghcr.io/roormonger/fitnab:latest
     container_name: fitnab
     restart: unless-stopped
     volumes:
