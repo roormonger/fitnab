@@ -18,12 +18,55 @@ struct AppState {
     fitgirl_provider: Arc<fitgirl::FitgirlProvider>,
 }
 
+impl AppState {
+    /// Performs a deep fetch for a game's metadata and updates the database.
+    /// Returns the updated GameEntry.
+    async fn jit_index_game(&self, mut game: provider::GameEntry) -> provider::GameEntry {
+        if game.is_indexed {
+            return game;
+        }
+
+        tracing::info!("JIT: Fetching metadata for {}", game.title);
+        if let Ok(metadata) = self.fitgirl_provider.fetch_metadata(&game.post_url).await {
+            let (hash, _) = metadata.magnet_link.as_ref()
+                .map(|m| extract_info_hash_and_trackers(m))
+                .unwrap_or((None, vec![]));
+            
+            // Update DB
+            let _ = sqlx::query(
+                "UPDATE games SET is_indexed = 1, magnet_link = ?1, size_bytes = ?2, published_at = ?3, info_hash = ?4, seeders = ?5, leechers = ?6, completed = ?7 WHERE id = ?8"
+            )
+            .bind(&metadata.magnet_link)
+            .bind(metadata.size_bytes)
+            .bind(&metadata.published_at)
+            .bind(&hash)
+            .bind(metadata.seeders)
+            .bind(metadata.leechers)
+            .bind(metadata.completed)
+            .bind(&game.id)
+            .execute(&self.pool).await;
+
+            game.magnet_link = metadata.magnet_link;
+            game.size_bytes = metadata.size_bytes;
+            game.published_at = metadata.published_at;
+            game.info_hash = hash;
+            game.seeders = metadata.seeders;
+            game.leechers = metadata.leechers;
+            game.completed = metadata.completed;
+            game.is_indexed = true;
+        } else {
+            tracing::error!("JIT: Failed to fetch metadata for {}", game.title);
+        }
+        game
+    }
+}
+
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     tracing_subscriber::fmt::init();
     tracing::info!("Starting Fitnab...");
 
-    let db_url = std::env::var("DATABASE_URL").unwrap_or_else(|_| "sqlite:fitnab.db".to_string());
+    let db_url = "sqlite:/app/data/fitnab.db?mode=rwc";
     
     let pool = SqlitePoolOptions::new()
         .max_connections(5)
@@ -172,37 +215,7 @@ async fn torznab_api_handler(
             let mut items = String::new();
             for mut game in results {
                 // JIT Fetch: If not indexed, go fetch metadata
-                if !game.is_indexed {
-                    tracing::info!("JIT: Fetching metadata for {}", game.title);
-                    if let Ok(metadata) = state.fitgirl_provider.fetch_metadata(&game.post_url).await {
-                        let (hash, _) = metadata.magnet_link.as_ref()
-                            .map(|m| extract_info_hash_and_trackers(m))
-                            .unwrap_or((None, vec![]));
-                        
-                        // Update DB
-                        let _ = sqlx::query(
-                            "UPDATE games SET is_indexed = 1, magnet_link = ?1, size_bytes = ?2, published_at = ?3, info_hash = ?4, seeders = ?5, leechers = ?6, completed = ?7 WHERE id = ?8"
-                        )
-                        .bind(&metadata.magnet_link)
-                        .bind(metadata.size_bytes)
-                        .bind(&metadata.published_at)
-                        .bind(&hash)
-                        .bind(metadata.seeders)
-                        .bind(metadata.leechers)
-                        .bind(metadata.completed)
-                        .bind(&game.id)
-                        .execute(&state.pool).await;
-
-                        game.magnet_link = metadata.magnet_link;
-                        game.size_bytes = metadata.size_bytes;
-                        game.published_at = metadata.published_at;
-                        game.info_hash = hash;
-                        game.seeders = metadata.seeders;
-                        game.leechers = metadata.leechers;
-                        game.completed = metadata.completed;
-                        game.is_indexed = true;
-                    }
-                }
+                game = state.jit_index_game(game).await;
 
                 // Live Health Check
                 let mut seeders = game.seeders.unwrap_or(0) as u32;
@@ -336,37 +349,11 @@ async fn download_handler(
         None => return (StatusCode::NOT_FOUND, "Game not found").into_response(),
     };
 
-    if game.is_indexed && game.magnet_link.is_some() {
-        return Redirect::temporary(&game.magnet_link.unwrap()).into_response();
-    }
+    let game = state.jit_index_game(game).await;
 
-    // Do deep fetch
-    match state.fitgirl_provider.fetch_metadata(&game.post_url).await {
-        Ok(metadata) => {
-            if let Some(magnet) = metadata.magnet_link.clone() {
-                let (hash, _) = extract_info_hash_and_trackers(&magnet);
-                // Update DB
-                let _ = sqlx::query(
-                    "UPDATE games SET is_indexed = 1, magnet_link = ?1, size_bytes = ?2, published_at = ?3, info_hash = ?4, seeders = ?5, leechers = ?6, completed = ?7 WHERE id = ?8"
-                )
-                .bind(&metadata.magnet_link)
-                .bind(metadata.size_bytes)
-                .bind(&metadata.published_at)
-                .bind(&hash)
-                .bind(metadata.seeders)
-                .bind(metadata.leechers)
-                .bind(metadata.completed)
-                .bind(&id)
-                .execute(&state.pool).await;
-                
-                return Redirect::temporary(&magnet).into_response();
-            } else {
-                return (StatusCode::NOT_FOUND, "Magnet link not found on FitGirl page").into_response();
-            }
-        }
-        Err(e) => {
-            tracing::error!("Fetch metadata failed: {}", e);
-            return (StatusCode::INTERNAL_SERVER_ERROR, "Failed to scrape FitGirl").into_response();
-        }
+    if game.magnet_link.is_some() {
+        return Redirect::temporary(&game.magnet_link.unwrap()).into_response();
+    } else {
+        return (StatusCode::NOT_FOUND, "Magnet link not found").into_response();
     }
 }

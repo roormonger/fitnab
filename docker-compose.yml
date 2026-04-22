@@ -2,29 +2,12 @@ version: '3.8'
 
 services:
   fitnab:
-    image: rust:alpine
-    container_name: fitnab_dev
-    # Mount the local project directory so changes reflect immediately without rebuilding the image
+    build: .
+    container_name: fitnab
+    restart: unless-stopped
     volumes:
-      - .:/app
-      # Cache cargo registry and target folders to prevent recompiling dependencies on container restart
-      - cargo_registry:/usr/local/cargo/registry
-      - target_cache:/app/target
-      # Mount a local data directory for persistent SQLite development storage
       - ./data:/app/data
-    working_dir: /app
     ports:
       - "3000:3000"
     environment:
-      - DATABASE_URL=sqlite:/app/data/fitnab.db?mode=rwc
       - RUST_LOG=info,fitnab=debug
-      - RUSTFLAGS=-C target-feature=-crt-static
-    # Install Alpine dependencies required for Rust/SQLite on startup, then run the app natively
-    command: >
-      sh -c "apk add --no-cache musl-dev sqlite-dev openssl-dev pkgconfig g++ gcc make cmake go perl clang clang-dev linux-headers git &&
-             rustup component add rustfmt &&
-             cargo run"
-
-volumes:
-  cargo_registry:
-  target_cache:
